@@ -1,0 +1,102 @@
+version: '3.8'
+
+services:
+  # ============================================================================
+  # PostgreSQL Database: Hydrological Time-Series & Sensor Storage
+  # ============================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: aquasense-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-aquasense_db}
+      POSTGRES_USER: ${POSTGRES_USER:-aquasense}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aquasense_secret}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - ./database/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - ./data:/data:ro
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-aquasense} -d ${POSTGRES_DB:-aquasense_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - aquasense-network
+
+  # ============================================================================
+  # Java Spring Boot Backend Service: REST APIs, Data Access & Business Logic
+  # ============================================================================
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: aquasense-backend
+    restart: unless-stopped
+    ports:
+      - "${BACKEND_PORT:-8080}:8080"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-aquasense_db}
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-aquasense}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-aquasense_secret}
+      ML_SERVICE_URL: http://ml-service:8000
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - aquasense-network
+
+  # ============================================================================
+  # Python FastAPI ML Service: Predictive Analytics & Model Training
+  # ============================================================================
+  ml-service:
+    build:
+      context: ./ml-service
+      dockerfile: Dockerfile
+    container_name: aquasense-ml-service
+    restart: unless-stopped
+    ports:
+      - "${ML_PORT:-8000}:8000"
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-aquasense}:${POSTGRES_PASSWORD:-aquasense_secret}@postgres:5432/${POSTGRES_DB:-aquasense_db}
+      BACKEND_URL: http://backend:8080
+      MODEL_NAME: AquaForecast-Ridge-v1
+      FORECAST_HORIZON_DAYS: 14
+    volumes:
+      - ./data:/data:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - aquasense-network
+
+  # ============================================================================
+  # React + Vite Frontend: Reservoir Dashboard & Interactive Visualizer
+  # ============================================================================
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: aquasense-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-3000}:80"
+    depends_on:
+      - backend
+      - ml-service
+    networks:
+      - aquasense-network
+
+# ==============================================================================
+# Persistent Volumes & Networks
+# ==============================================================================
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  aquasense-network:
+    driver: bridge
